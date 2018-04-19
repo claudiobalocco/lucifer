@@ -1,4 +1,3 @@
-/*
 Lucifer - a 3D FDTD simulator
 Copyright (C) 2015-2018 Claudio Balocco
 
@@ -13,4 +12,3 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/

@@ -107,8 +107,17 @@ if smax == 0
     smax = 1; % no field at all
 end
 
+% video package >= 2.0 (and MATLAB) use VideoWriter; avifile/addframe only
+% exist in the old 1.x video package
+use_videowriter = exist('VideoWriter') > 0;
 if make_movie
-    aviobj = avifile(movie_name,"fps",frame_rate);
+    if use_videowriter
+        aviobj = VideoWriter(movie_name);
+        aviobj.FrameRate = frame_rate;
+        open(aviobj);
+    else
+        aviobj = avifile(movie_name,"fps",frame_rate);
+    end
 end
 
 for i=1:maxt
@@ -126,8 +135,19 @@ for i=1:maxt
         s(s>0.5) = 0.5;
         s(s<-0.5) = -0.5;
         s = s + 0.5;
-        addframe(aviobj,s);
+        if use_videowriter
+            % 8 bit RGB frame; most codecs need an even width and height
+            frame = uint8(round(s*255));
+            frame(end+1:end+mod(rows(frame),2), :) = 128;
+            frame(:, end+1:end+mod(columns(frame),2)) = 128;
+            writeVideo(aviobj, repmat(frame, [1 1 3]));
+        else
+            addframe(aviobj,s);
+        end
     end
 end
 
 fclose(fid);
+if make_movie && use_videowriter
+    close(aviobj);
+end

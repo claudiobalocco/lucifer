@@ -16,15 +16,15 @@ def get_src_par():
 	return pars
 
 def get_time_profile(t_buf, simp):
+	# t_buf is a memoryview on the C array: numpy.frombuffer creates a view, no copy
 	dt = numpy.dtype(numpy.float32)
 	dt = dt.newbyteorder('<')
 	t = numpy.frombuffer(t_buf,dtype=dt)
-	
+
 	C0 = simp['C0']
 	delta_t = simp['dt']
 	max_time = simp['max_time']
-	
-	for i in xrange(0, max_time-1):
+
+	for i in range(0, max_time):
 		#t[i] = math.sin(2*numpy.pi*0.5e15*i*delta_t)
 		t[i] = -(i-500)*numpy.exp(-((i-500)*delta_t/0.25e-12)**2)
-

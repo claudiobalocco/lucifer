@@ -2,6 +2,11 @@
 # ------ LUCIFER CONFIGURATION -------
 # ------------------------------------
 
+import os
+
+# folder of this file: the data file is written next to it, on Linux and Windows
+_here = os.path.dirname(os.path.abspath(__file__))
+
 def get_pars():
 	pars = {
 		# simulation domain in number of cells
@@ -15,11 +20,13 @@ def get_pars():
 		# simulation time in s
 		'sim_time': 5e-12,
 		#
-		# Courant number
+		# Courant number (must be <= 1/sqrt(3) = 0.577 in 3D)
 		'courant': 0.5,
 		#
-		# boundaries		
-		# pcb: periodic; abc: absorbing
+		# boundaries
+		# pbc: periodic; abc: absorbing
+		# pbc must be set on both faces of an axis (front/back = x, left/right = y,
+		# top/bottom = z); the period is size-1 cells
 		'front'  : 'pbc',
 		'back'   : 'pbc',
 		'left'   : 'pbc',
@@ -41,10 +48,6 @@ def get_pars():
 						),
 		#
 		# data file
-		'data_file': '/home/lucifer/lucifer/sims/example1/luc_data_ex1.dat'	
+		'data_file': os.path.join(_here, 'luc_data_ex1.dat')
 	}
 	return pars
-
-
-
-

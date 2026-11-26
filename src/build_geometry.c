@@ -15,18 +15,18 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#include <Python.h>
+
+#include "lucifer_global_def.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "lucifer_global_def.h"
 
 
 int build_geometry(const char *geom_file, LUC_sim_pars *simp, LUC_diel_mat *diel) {
 	
 	PyObject *pluginModule, *filterFunc, *args, *result, *fname; 
 		
-	fname = PyString_FromString(geom_file);
+	fname = PyUnicode_DecodeFSDefault(geom_file);
 	pluginModule = PyImport_Import(fname);
 	Py_DECREF(fname); // we used it, now decrement the reference counter	
 	if(!pluginModule) {
@@ -63,3 +63,27 @@ int build_geometry(const char *geom_file, LUC_sim_pars *simp, LUC_diel_mat *diel
 }
 
 
+
+/*
+ Material indices index the coefficient tables (MAX_NUM_OF_MATERIALS entries):
+ a larger index would read outside them. Parallel read-only scan, no copy.
+*/
+int check_materials(LUC_sim_pars *simp, LUC_diel_mat *diel) {
+
+	const unsigned short *m = (*diel).material;
+	const long long n = (long long)(*simp).n_cells;
+	long long i;
+	int max_idx = 0;
+
+	#pragma omp parallel for reduction(max:max_idx)
+	for(i = 0; i < n; i++)
+		if(m[i] > max_idx)
+			max_idx = m[i];
+
+	if(max_idx >= MAX_NUM_OF_MATERIALS) {
+		printf(C_RED "[ERROR]" C_RES " material index %d found in the geometry, the maximum is %d\n", max_idx, MAX_NUM_OF_MATERIALS-1);
+		return 0;
+	}
+	printf(C_GREEN "[MSG]" C_RES " highest material index used: %d\n", max_idx);
+	return 1;
+}

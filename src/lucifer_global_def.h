@@ -3,7 +3,7 @@ Lucifer - a 3D FDTD simulator
 Copyright (C) 2015-2018 Claudio Balocco
 
 This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License version 3 as 
+it under the terms of the GNU General Public License version 3 as
 published by the Free Software Foundation.
 
 This program is distributed in the hope that it will be useful,
@@ -18,7 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #ifndef LUCIFER_GLOBAL_DEF_H
 #define LUCIFER_GLOBAL_DEF_H
 
-#define LUC_VER "Lucifer 0.4.2"
+#define LUC_VER "Lucifer 1.0.0"
 
 #define ETA0 376.73031 // vacuum impedance (ohm)
 #define C0 299792458   // speed of light in vacuum (m/s)
@@ -33,8 +33,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define C_CYAN    "\x1b[36;1m"
 #define C_RES     "\x1b[0m"
 
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
-#include <stdio.h> // for FILE type
+#include <stdio.h>  // for FILE type
+#include <stddef.h> // for size_t, ptrdiff_t
+
+// tells the compiler that arrays do not overlap, so the update loops can be vectorized
+#if defined(_MSC_VER)
+#define LUC_RESTRICT __restrict
+#else
+#define LUC_RESTRICT restrict
+#endif
+
+// format of the data file written by write_header.c (see there for the layout)
+#define LUC_DATA_FORMAT 2
 
 typedef struct {
 	int field;         // 0:Ex, 1:Ey, 2:Ez, 3:Hx, 4:Hy, 5:Hz
@@ -47,6 +59,7 @@ typedef struct {
 	int size_x;
 	int size_y;
 	int size_z;
+	size_t n_cells;   // size_x*size_y*size_z
 
 	float courant;    // Courant number
 
@@ -63,13 +76,14 @@ typedef struct {
 	int abc_k, abc_f, abc_l, abc_r, abc_b, abc_t;  // (0||1) for abc type
 	int pbc_k, pbc_f, pbc_l, pbc_r, pbc_b, pbc_t;  // (0||1) for pbc type
 
-	// file names
+	// file names (UTF-8 buffers owned by the Python objects in py_simp_dict)
 	const char *data_file;
 	const char *geom_file;
 	const char **src_files;
 
 	// field views to save
 	LUC_field_view *field_views; // array of field views
+	float *view_buf;             // size_x*size_y floats, to gather xy planes before writing
 
 	// python dictionary from conf script
 	PyObject *py_simp_dict;
@@ -85,7 +99,7 @@ typedef struct {
 	float *Ez;
 } LUC_fields;
 
-typedef struct {	
+typedef struct {
 	float *Cexe; // update coefficients - length equal to MAX_NUM_OF_MATERIALS - 0 is always vacuum
 	float *Cexh;
 	float *Ceye;
@@ -93,15 +107,16 @@ typedef struct {
 	float *Ceze;
 	float *Cezh;
 
+	// writable memoryviews wrapping the C arrays above (no copy)
 	PyObject *py_Cexe;
 	PyObject *py_Cexh;
 	PyObject *py_Ceye;
 	PyObject *py_Ceyh;
 	PyObject *py_Ceze;
-	PyObject *py_Cezh;	
+	PyObject *py_Cezh;
 
 	unsigned short *material; // size_x * size_y * size_z - material[x,y,z] is the material index at (x,y,z)
-	PyObject *py_material;
+	PyObject *py_material;    // writable memoryview wrapping material (no copy)
 } LUC_diel_mat;
 
 typedef struct {
@@ -136,8 +151,7 @@ int updateH(LUC_fields *fields, LUC_diel_mat *diel, LUC_sim_pars *simp); // upda
 int source_init(const char *source_file, LUC_source **src, LUC_sim_pars *simp); // add_source.c
 int add_source(LUC_source *src, LUC_fields *fields, LUC_sim_pars *simp); // add_source.c
 int abc(LUC_fields *fields, LUC_abc_fields *abc_fields, LUC_sim_pars *simp); // abc.c
+int pbc(LUC_fields *fields, LUC_sim_pars *simp); // pbc.c
+int check_materials(LUC_sim_pars *simp, LUC_diel_mat *diel); // build_geometry.c
 int write_field_views(FILE *fp, LUC_fields *fields, LUC_sim_pars *simp); // write_field_views.c
 #endif
-
-
-

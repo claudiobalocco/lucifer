@@ -1,0 +1,12 @@
+# build output
+bin/
+src/*.o
+src/build_win/
+*.obj
+*.exe
+# editor and Python files
+*.swp
+__pycache__/
+# simulation results
+*.dat
+*.avi

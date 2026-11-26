@@ -3,7 +3,7 @@ Lucifer - a 3D FDTD simulator
 Copyright (C) 2015-2018 Claudio Balocco
 
 This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License version 3 as 
+it under the terms of the GNU General Public License version 3 as
 published by the Free Software Foundation.
 
 This program is distributed in the hope that it will be useful,
@@ -17,48 +17,55 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "lucifer_global_def.h"
 
-#define EX (*fields).Ex
-#define EY (*fields).Ey
-#define EZ (*fields).Ez
-#define HX (*fields).Hx
-#define HY (*fields).Hy
-#define HZ (*fields).Hz
-
-#define xyz x*sy*sz+y*sz+z
-#define Xyz (x+1)*sy*sz+y*sz+z
-#define xYz x*sy*sz+(y+1)*sz+z
-#define xyZ x*sy*sz+y*sz+(z+1)
+/*
+ H update, one pass over the (x,y) rows (see updateE.c).
+ Update ranges (same as the original three loops):
+   Hx: x in [0,sx)   y in [0,sy-1) z in [0,sz-1)
+   Hy: x in [0,sx-1) y in [0,sy)   z in [0,sz-1)
+   Hz: x in [0,sx-1) y in [0,sy-1) z in [0,sz)
+*/
 
 int updateH(LUC_fields *fields, LUC_diel_mat *diel, LUC_sim_pars *simp) {
 
-	float coef = (*simp).courant/ETA0;
+	const float coef = (float)((*simp).courant/ETA0);
 
-	int sx = (*simp).size_x;
-	int sy = (*simp).size_y;
-	int sz = (*simp).size_z;
+	const int sx = (*simp).size_x;
+	const int sy = (*simp).size_y;
+	const int sz = (*simp).size_z;
+	const ptrdiff_t stride_x = (ptrdiff_t)sy*sz;
+	const ptrdiff_t stride_y = sz;
 
-	int x, y, z;
-	
-	#pragma omp parallel for private(x,y,z)
-	for (x = 0; x < sx; x++)
-		for (y = 0; y < sy-1; y++)
-			for (z = 0; z < sz-1; z++)
-				HX[xyz] = HX[xyz]+coef*(EY[xyZ]-EY[xyz]-EZ[xYz]+EZ[xyz]);
-    	
-	#pragma omp parallel for private(x,y,z)
-	for (x=0;x<sx-1;x++)
-		for (y=0;y<sy;y++)
-			for (z=0;z<sz-1;z++)
-				HY[xyz] = HY[xyz]+coef*(EZ[Xyz]-EZ[xyz]-EX[xyZ]+EX[xyz]);
+	float *LUC_RESTRICT hx = (*fields).Hx;
+	float *LUC_RESTRICT hy = (*fields).Hy;
+	float *LUC_RESTRICT hz = (*fields).Hz;
+	const float *LUC_RESTRICT ex = (*fields).Ex;
+	const float *LUC_RESTRICT ey = (*fields).Ey;
+	const float *LUC_RESTRICT ez = (*fields).Ez;
 
-	#pragma omp parallel for private(x,y,z)
-	for (x=0;x<sx-1;x++)
-		for (y=0;y<sy-1;y++)
-			for (z=0;z<sz;z++)
-				HZ[xyz] = HZ[xyz]+coef*(EX[xYz]-EX[xyz]-EY[Xyz]+EY[xyz]);
+	int x, y;
+	(void)diel;
+
+	#pragma omp parallel for collapse(2) schedule(static)
+	for (x = 0; x < sx; x++) {
+		for (y = 0; y < sy; y++) {
+			const ptrdiff_t r   = x*stride_x + y*stride_y; // row (x,y)
+			const ptrdiff_t rxp = r + stride_x;            // row (x+1,y), used only if x < sx-1
+			const ptrdiff_t ryp = r + stride_y;            // row (x,y+1), used only if y < sy-1
+			int z;
+
+			if (y < sy-1) // Hx
+				for (z = 0; z < sz-1; z++)
+					hx[r+z] = hx[r+z]+coef*(ey[r+z+1]-ey[r+z]-ez[ryp+z]+ez[r+z]);
+
+			if (x < sx-1) // Hy
+				for (z = 0; z < sz-1; z++)
+					hy[r+z] = hy[r+z]+coef*(ez[rxp+z]-ez[r+z]-ex[r+z+1]+ex[r+z]);
+
+			if (x < sx-1 && y < sy-1) // Hz
+				for (z = 0; z < sz; z++)
+					hz[r+z] = hz[r+z]+coef*(ex[ryp+z]-ex[r+z]-ey[rxp+z]+ey[r+z]);
+		}
+	}
 
 	return 1;
-
 }
-
-

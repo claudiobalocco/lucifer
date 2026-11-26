@@ -3,7 +3,7 @@ Lucifer - a 3D FDTD simulator
 Copyright (C) 2015-2018 Claudio Balocco
 
 This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License version 3 as 
+it under the terms of the GNU General Public License version 3 as
 published by the Free Software Foundation.
 
 This program is distributed in the hope that it will be useful,
@@ -15,19 +15,43 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#include <Python.h>
+#include "lucifer_global_def.h"
 #include <stdlib.h>
 #include <string.h>
-#include "lucifer_global_def.h"	
+
+/*
+ Python 3 has no PyBuffer_New. The arrays shared with the Python scripts are
+ allocated here in C and exposed to Python as writable memoryviews
+ (PyMemoryView_FromMemory). numpy.frombuffer() on a memoryview gives a numpy
+ array that points to the same memory: no copy is made in either direction.
+ The C memory is never freed while the memoryviews exist (they live until exit).
+*/
+static PyObject * wrap_memory(void *ptr, size_t size) {
+	PyObject *mv = PyMemoryView_FromMemory((char *)ptr, (Py_ssize_t)size, PyBUF_WRITE);
+	if(!mv)
+		PyErr_Print();
+	return mv;
+}
 
 LUC_fields * allocate_fields(LUC_sim_pars *simp) {
 
 	LUC_fields *fields;
-	
+	size_t n = (*simp).n_cells;
+	size_t size = n*sizeof(float);
+	const int sx = (*simp).size_x;
+	const int sy = (*simp).size_y;
+	const int sz = (*simp).size_z;
+	const ptrdiff_t stride_x = (ptrdiff_t)sy*sz;
+	int x, y;
+
+	// buffer to gather one xy plane in write_field_views.c (small: size_x*size_y)
+	(*simp).view_buf = (float *)malloc((size_t)sx*sy*sizeof(float));
+	if(!(*simp).view_buf)
+		return NULL;
+
 	fields = malloc(sizeof(LUC_fields));
-	
-	int size = (*simp).size_x*(*simp).size_y*(*simp).size_z*sizeof(float);
-	int i;	
+	if(!fields)
+		return NULL;
 
 	(*fields).Hx = (float *)malloc(size);
 	(*fields).Hy = (float *)malloc(size);
@@ -35,24 +59,25 @@ LUC_fields * allocate_fields(LUC_sim_pars *simp) {
 	(*fields).Ex = (float *)malloc(size);
 	(*fields).Ey = (float *)malloc(size);
 	(*fields).Ez = (float *)malloc(size);
+	if(!(*fields).Hx || !(*fields).Hy || !(*fields).Hz || !(*fields).Ex || !(*fields).Ey || !(*fields).Ez)
+		return NULL;
 
 	// set initial fields to 0
-	/* memset((*fields).Hx, 0, size);
-	memset((*fields).Hy, 0, size);
-	memset((*fields).Hz, 0, size);
-	memset((*fields).Ex, 0, size);
-	memset((*fields).Ey, 0, size);
-	memset((*fields).Ez, 0, size); */
-
-	#pragma omp parallel for private(i)
-	for(i = 0; i < (*simp).size_x*(*simp).size_y*(*simp).size_z; i++) {
-		(*fields).Ex[i] = 0;
-		(*fields).Ey[i] = 0;
-		(*fields).Ez[i] = 0;
-		(*fields).Hx[i] = 0;
-		(*fields).Hy[i] = 0;
-		(*fields).Hz[i] = 0;
-	}
+	// done in parallel with the same (x,y) row split as updateE/updateH, so that on
+	// multi-socket machines each page is placed on the node of the thread that updates it
+	// (first touch). Call omp_set_num_threads before this.
+	#pragma omp parallel for collapse(2) schedule(static)
+	for(x = 0; x < sx; x++)
+		for(y = 0; y < sy; y++) {
+			const ptrdiff_t r = x*stride_x + (ptrdiff_t)y*sz;
+			memset((*fields).Ex + r, 0, (size_t)sz*sizeof(float));
+			memset((*fields).Ey + r, 0, (size_t)sz*sizeof(float));
+			memset((*fields).Ez + r, 0, (size_t)sz*sizeof(float));
+			memset((*fields).Hx + r, 0, (size_t)sz*sizeof(float));
+			memset((*fields).Hy + r, 0, (size_t)sz*sizeof(float));
+			memset((*fields).Hz + r, 0, (size_t)sz*sizeof(float));
+		}
+	(void)n;
 
 	return fields;
 }
@@ -60,39 +85,49 @@ LUC_fields * allocate_fields(LUC_sim_pars *simp) {
 LUC_diel_mat * allocate_diel(LUC_sim_pars *simp) {
 
 	LUC_diel_mat *diel;
+	size_t xyzi_size = (*simp).n_cells*sizeof(unsigned short);
+	size_t mat_size = MAX_NUM_OF_MATERIALS*sizeof(float);
+
+	const int sx = (*simp).size_x;
+	const int sy = (*simp).size_y;
+	const int sz = (*simp).size_z;
+	const ptrdiff_t stride_x = (ptrdiff_t)sy*sz;
+	int x, y;
 
 	diel = malloc(sizeof(LUC_diel_mat));
+	if(!diel)
+		return NULL;
 
-	int xyzi_size = (*simp).size_x*(*simp).size_y*(*simp).size_z*sizeof(unsigned short);
-	int mat_size = MAX_NUM_OF_MATERIALS*sizeof(float);
-	Py_ssize_t s;
-
-	(*diel).py_material = PyBuffer_New(xyzi_size);
 	(*diel).material = (unsigned short *)malloc(xyzi_size);
-	PyObject_AsWriteBuffer((*diel).py_material, (void **)&((*diel).material), &s);
-	memset((*diel).material, 0, xyzi_size); // all is vacuum
+	if(!(*diel).material)
+		return NULL;
+	// all is vacuum; zeroed in parallel for first touch placement (see allocate_fields)
+	#pragma omp parallel for collapse(2) schedule(static)
+	for(x = 0; x < sx; x++)
+		for(y = 0; y < sy; y++)
+			memset((*diel).material + x*stride_x + (ptrdiff_t)y*sz, 0, (size_t)sz*sizeof(unsigned short));
+	(*diel).py_material = wrap_memory((*diel).material, xyzi_size);
+	if(!(*diel).py_material)
+		return NULL;
 
 	// update coefficients
-	(*diel).py_Cexe = PyBuffer_New(mat_size);
-	(*diel).py_Cexh = PyBuffer_New(mat_size);
-	(*diel).py_Ceye = PyBuffer_New(mat_size);
-	(*diel).py_Ceyh = PyBuffer_New(mat_size);
-	(*diel).py_Ceze = PyBuffer_New(mat_size);
-	(*diel).py_Cezh = PyBuffer_New(mat_size);
+	(*diel).Cexe = (float *)calloc(MAX_NUM_OF_MATERIALS, sizeof(float));
+	(*diel).Cexh = (float *)calloc(MAX_NUM_OF_MATERIALS, sizeof(float));
+	(*diel).Ceye = (float *)calloc(MAX_NUM_OF_MATERIALS, sizeof(float));
+	(*diel).Ceyh = (float *)calloc(MAX_NUM_OF_MATERIALS, sizeof(float));
+	(*diel).Ceze = (float *)calloc(MAX_NUM_OF_MATERIALS, sizeof(float));
+	(*diel).Cezh = (float *)calloc(MAX_NUM_OF_MATERIALS, sizeof(float));
+	if(!(*diel).Cexe || !(*diel).Cexh || !(*diel).Ceye || !(*diel).Ceyh || !(*diel).Ceze || !(*diel).Cezh)
+		return NULL;
 
-	(*diel).Cexe = (float *)malloc(mat_size);
-	(*diel).Cexh = (float *)malloc(mat_size);
-	(*diel).Ceye = (float *)malloc(mat_size);
-	(*diel).Ceyh = (float *)malloc(mat_size);
-	(*diel).Ceze = (float *)malloc(mat_size);
-	(*diel).Cezh = (float *)malloc(mat_size);
-
-	PyObject_AsWriteBuffer((*diel).py_Cexe, (void **)&((*diel).Cexe), &s);
-	PyObject_AsWriteBuffer((*diel).py_Cexh, (void **)&((*diel).Cexh), &s);
-	PyObject_AsWriteBuffer((*diel).py_Ceye, (void **)&((*diel).Ceye), &s);
-	PyObject_AsWriteBuffer((*diel).py_Ceyh, (void **)&((*diel).Ceyh), &s);
-	PyObject_AsWriteBuffer((*diel).py_Ceze, (void **)&((*diel).Ceze), &s);
-	PyObject_AsWriteBuffer((*diel).py_Cezh, (void **)&((*diel).Cezh), &s);
+	(*diel).py_Cexe = wrap_memory((*diel).Cexe, mat_size);
+	(*diel).py_Cexh = wrap_memory((*diel).Cexh, mat_size);
+	(*diel).py_Ceye = wrap_memory((*diel).Ceye, mat_size);
+	(*diel).py_Ceyh = wrap_memory((*diel).Ceyh, mat_size);
+	(*diel).py_Ceze = wrap_memory((*diel).Ceze, mat_size);
+	(*diel).py_Cezh = wrap_memory((*diel).Cezh, mat_size);
+	if(!(*diel).py_Cexe || !(*diel).py_Cexh || !(*diel).py_Ceye || !(*diel).py_Ceyh || !(*diel).py_Ceze || !(*diel).py_Cezh)
+		return NULL;
 
 	return diel;
 }
@@ -100,47 +135,34 @@ LUC_diel_mat * allocate_diel(LUC_sim_pars *simp) {
 LUC_abc_fields * allocate_abc(LUC_sim_pars *simp) {
 
 	LUC_abc_fields *abc_f;
-	
+	size_t sizex = (size_t)(*simp).size_y*(*simp).size_z;
+	size_t sizey = (size_t)(*simp).size_x*(*simp).size_z;
+	size_t sizez = (size_t)(*simp).size_x*(*simp).size_y;
+
 	abc_f = malloc(sizeof(LUC_abc_fields));
+	if(!abc_f)
+		return NULL;
 
-	int sizex = (*simp).size_y*(*simp).size_z*sizeof(float);
-	int sizey = (*simp).size_x*(*simp).size_z*sizeof(float);
-	int sizez = (*simp).size_x*(*simp).size_y*sizeof(float);
+	// calloc returns zeroed memory
+	(*abc_f).Eyx0 = (float *)calloc(sizex, sizeof(float));
+	(*abc_f).Ezx0 = (float *)calloc(sizex, sizeof(float));
+	(*abc_f).Eyx1 = (float *)calloc(sizex, sizeof(float));
+	(*abc_f).Ezx1 = (float *)calloc(sizex, sizeof(float));
 
-	(*abc_f).Eyx0 = (float *)malloc(sizex);
-	(*abc_f).Ezx0 = (float *)malloc(sizex);
-	(*abc_f).Eyx1 = (float *)malloc(sizex);
-	(*abc_f).Ezx1 = (float *)malloc(sizex);
-		    
-	(*abc_f).Exy0 = (float *)malloc(sizey);
-	(*abc_f).Ezy0 = (float *)malloc(sizey);
-	(*abc_f).Exy1 = (float *)malloc(sizey);
-	(*abc_f).Ezy1 = (float *)malloc(sizey);
+	(*abc_f).Exy0 = (float *)calloc(sizey, sizeof(float));
+	(*abc_f).Ezy0 = (float *)calloc(sizey, sizeof(float));
+	(*abc_f).Exy1 = (float *)calloc(sizey, sizeof(float));
+	(*abc_f).Ezy1 = (float *)calloc(sizey, sizeof(float));
 
-	(*abc_f).Exz0 = (float *)malloc(sizez);
-	(*abc_f).Eyz0 = (float *)malloc(sizez);
-	(*abc_f).Exz1 = (float *)malloc(sizez);
-	(*abc_f).Eyz1 = (float *)malloc(sizez);
+	(*abc_f).Exz0 = (float *)calloc(sizez, sizeof(float));
+	(*abc_f).Eyz0 = (float *)calloc(sizez, sizeof(float));
+	(*abc_f).Exz1 = (float *)calloc(sizez, sizeof(float));
+	(*abc_f).Eyz1 = (float *)calloc(sizez, sizeof(float));
 
-	memset((*abc_f).Eyx0, 0, sizex);
-	memset((*abc_f).Ezx0, 0, sizex);
-	memset((*abc_f).Eyx1, 0, sizex);
-	memset((*abc_f).Ezx1, 0, sizex);
-
-	memset((*abc_f).Exy0, 0, sizey);
-	memset((*abc_f).Ezy0, 0, sizey);
-	memset((*abc_f).Exy1, 0, sizey);
-	memset((*abc_f).Ezy1, 0, sizey);
-	
-    memset((*abc_f).Exz0, 0, sizez);
-	memset((*abc_f).Eyz0, 0, sizez);
-	memset((*abc_f).Exz1, 0, sizez);
-	memset((*abc_f).Eyz1, 0, sizez);
+	if(!(*abc_f).Eyx0 || !(*abc_f).Ezx0 || !(*abc_f).Eyx1 || !(*abc_f).Ezx1 ||
+	   !(*abc_f).Exy0 || !(*abc_f).Ezy0 || !(*abc_f).Exy1 || !(*abc_f).Ezy1 ||
+	   !(*abc_f).Exz0 || !(*abc_f).Eyz0 || !(*abc_f).Exz1 || !(*abc_f).Eyz1)
+		return NULL;
 
 	return abc_f;
 }
-
-
-
-
-
